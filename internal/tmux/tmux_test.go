@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +27,14 @@ const testSocket = "amtmuxtest"
 // exit-empty shutdown that takes the next test's fresh session down with it
 // ("server exited unexpectedly").
 func TestMain(m *testing.M) {
+	if os.Getenv("AM_TMUX_PASTE_HELPER") == "1" {
+		driver := &Driver{bin: os.Getenv("AM_TMUX_PASTE_BIN"), socket: testSocket}
+		if err := driver.paste(os.Getenv("AM_TMUX_PASTE_TARGET"), os.Getenv("AM_TMUX_PASTE_TEXT")); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	// kill-server fails whenever no server is up, which is the normal case.
 	tmuxCmd("kill-server").Run()
 	// Without tmux the run still starts: each test skips through its own
@@ -292,6 +301,101 @@ func TestSendTextWaitsOutTheWindowWhenTheBaselineCaptureFails(t *testing.T) {
 	}
 	if !strings.Contains(string(logged), "send-keys -t "+PaneTarget("x1")+" Enter") {
 		t.Fatalf("Enter never sent, calls:\n%s", logged)
+	}
+}
+
+func TestPasteBuffersIsolatedAcrossProcesses(t *testing.T) {
+	for _, failFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failFirst=%v", failFirst), func(t *testing.T) {
+			driver := requireTmux(t)
+			realTmux, err := exec.LookPath("tmux")
+			if err != nil {
+				t.Fatal(err)
+			}
+			binary, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			gate := filepath.Join(dir, "release")
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			var ready, ids, names [2]string
+			var results [2]chan error
+			for i := range ids {
+				ids[i] = fmt.Sprintf("paste-process-%d-%d", time.Now().UnixNano(), i)
+				if err := driver.Create(ids[i], dir, "cat", nil, 100, 30); err != nil {
+					t.Fatal(err)
+				}
+				id := ids[i]
+				t.Cleanup(func() { driver.Kill(id) })
+				ready[i] = filepath.Join(dir, fmt.Sprintf("loaded-%d", i))
+				stub := filepath.Join(dir, fmt.Sprintf("tmux-%d", i))
+				script := "#!/bin/sh\ncase \"$3\" in\nload-buffer)\n" +
+					ShellQuote(realTmux) + " \"$@\" || exit $?\n" +
+					"printf '%s' \"$5\" > " + ShellQuote(ready[i]) + "\n" +
+					"n=0; while [ ! -f " + ShellQuote(gate) + " ]; do\n" +
+					"n=$((n+1)); [ \"$n\" -lt 1000 ] || exit 1; sleep 0.01\ndone;;\n" +
+					"*) exec " + ShellQuote(realTmux) + " \"$@\";;\nesac\n"
+				if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				target := PaneTarget(id)
+				if failFirst && i == 0 {
+					target = PaneTarget("missing-" + id)
+				}
+				cmd := exec.CommandContext(ctx, binary)
+				cmd.Env = append(os.Environ(), "AM_TMUX_PASTE_HELPER=1", "AM_TMUX_PASTE_BIN="+stub,
+					"AM_TMUX_PASTE_TARGET="+target, fmt.Sprintf("AM_TMUX_PASTE_TEXT=isolated-payload-%d", i))
+				if err := cmd.Start(); err != nil {
+					t.Fatal(err)
+				}
+				result := make(chan error, 1)
+				results[i] = result
+				go func() { result <- cmd.Wait() }()
+			}
+			// Both processes start their counters at one and leave their buffers
+			// loaded together before either is allowed to paste or clean up.
+			for i := range ready {
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					if data, err := os.ReadFile(ready[i]); err == nil && len(data) > 0 {
+						names[i] = string(data)
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if !strings.HasSuffix(names[i], "_1") {
+					t.Fatalf("process %d did not load its first buffer: %q", i, names[i])
+				}
+			}
+			if names[0] == names[1] {
+				t.Fatalf("processes shared buffer %q", names[0])
+			}
+			if err := os.WriteFile(gate, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for i, result := range results {
+				err := <-result
+				wantFailure := failFirst && i == 0
+				if (err != nil) != wantFailure {
+					t.Fatalf("process %d: err=%v wantFailure=%v", i, err, wantFailure)
+				}
+				if out, err := driver.run("show-buffer", "-b", names[i]); err == nil {
+					t.Fatalf("buffer %q survived paste: %s", names[i], out)
+				}
+				pane, err := driver.CapturePane(ids[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(pane, fmt.Sprintf("isolated-payload-%d", 1-i)) {
+					t.Fatalf("process %d received the other payload: %s", i, pane)
+				}
+				if got := strings.Contains(pane, fmt.Sprintf("isolated-payload-%d", i)); got == wantFailure {
+					t.Fatalf("process %d delivery=%v wantFailure=%v: %s", i, got, wantFailure, pane)
+				}
+			}
+		})
 	}
 }
 

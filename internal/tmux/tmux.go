@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
@@ -542,6 +543,7 @@ func (d *Driver) Paste(id, text string) error {
 	return d.paste(PaneTarget(id), text)
 }
 
+var pasteProcessID = rand.Text()
 var pasteSeq atomic.Uint64
 
 // Only a pane that never echoes what it reads waits out echoWait; an agent
@@ -626,7 +628,7 @@ func (d *Driver) paste(target, text string) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("paste temp close: %w", err)
 	}
-	buf := fmt.Sprintf("am_paste_%d", pasteSeq.Add(1))
+	buf := fmt.Sprintf("am_paste_%s_%d", pasteProcessID, pasteSeq.Add(1))
 	if _, err := d.run("load-buffer", "-b", buf, path); err != nil {
 		return err
 	}
