@@ -5,11 +5,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/YoanWai/agent-manager/internal/config"
 	"github.com/YoanWai/agent-manager/internal/git"
+	"github.com/YoanWai/agent-manager/internal/hooks"
 	"github.com/YoanWai/agent-manager/internal/status"
 	"github.com/YoanWai/agent-manager/internal/store"
 	"github.com/YoanWai/agent-manager/internal/tmux"
@@ -297,6 +300,84 @@ func TestSessionsSendAndReadReachTheTargetPane(t *testing.T) {
 	if _, err := h.sessions.Send(h.caller.ID, terminal.ID, "ls"); err == nil ||
 		!strings.Contains(err.Error(), "terminal, not an agent") {
 		t.Fatalf("sending to a terminal error = %v", err)
+	}
+}
+
+func TestSessionLifecycleRefusesForeignSocket(t *testing.T) {
+	h := newSessionHarness(t)
+	other := newSessionHarness(t)
+	created, err := h.sessions.Create(h.caller.ID, CreateSessionOptions{Name: "owned-worker", Tool: "resting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := h.store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.TmuxSocket != h.driver.SocketPath() || before.TmuxSocket == other.driver.SocketPath() {
+		t.Fatalf("invalid socket fixture: %q", before.TmuxSocket)
+	}
+	manager := hooks.NewManager(h.sessions.configDir)
+	path := manager.StatusFile(created.ID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(status.Working), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	foreign := newSessions(h.sessions.configDir, MCPVocabulary(), func() (*tmux.Driver, error) { return other.driver, nil }, git.New)
+	for _, duplicate := range []bool{false, true} {
+		if duplicate {
+			if err := other.driver.Create(created.ID, before.Cwd, "", nil, 80, 24); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { other.driver.Kill(created.ID) })
+		}
+		for _, operation := range []string{"kill", "revive", "relaunch"} {
+			var err error
+			switch operation {
+			case "kill":
+				_, err = foreign.Kill(h.caller.ID, created.ID)
+			case "revive":
+				_, err = foreign.Revive(h.caller.ID, created.ID)
+			case "relaunch":
+				_, err = RelaunchInPane(other.driver, h.store, manager, before, config.Tool{Command: "cat"})
+			}
+			if err == nil || !strings.Contains(err.Error(), "another tmux socket") {
+				t.Fatalf("%s duplicate=%v: %v", operation, duplicate, err)
+			}
+			after, err := h.store.Get(created.ID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("%s changed row: before=%+v after=%+v err=%v", operation, before, after, err)
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != status.Working {
+				t.Fatalf("%s changed hook: %q %v", operation, data, err)
+			}
+			if !h.driver.Exists(created.ID) || other.driver.Exists(created.ID) != duplicate {
+				t.Fatalf("%s changed pane ownership", operation)
+			}
+		}
+	}
+}
+
+func TestSessionLifecycleAllowsLegacySocket(t *testing.T) {
+	h := newSessionHarness(t)
+	created, err := h.sessions.Create(h.caller.ID, CreateSessionOptions{Name: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.SetTmuxSocket(created.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.sessions.Kill(h.caller.ID, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.sessions.Revive(h.caller.ID, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	row, err := h.store.Get(created.ID)
+	if err != nil || row.TmuxSocket != h.driver.SocketPath() || !h.driver.Exists(created.ID) {
+		t.Fatalf("legacy revive: %+v err=%v", row, err)
 	}
 }
 

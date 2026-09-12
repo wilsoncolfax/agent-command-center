@@ -63,6 +63,9 @@ func InjectPickerKeys(driver *tmux.Driver, sessID, composerPattern, keys string)
 // session environment rides along inline because a pane opened by an older
 // manager holds a shell that was never given it.
 func RelaunchInPane(driver *tmux.Driver, st *store.Store, hookManager *hooks.Manager, sess store.Session, tool config.Tool) (time.Time, error) {
+	if err := CheckSocketOwnership(driver, sess); err != nil {
+		return time.Time{}, err
+	}
 	running, err := AgentRunning(driver, sess.ID)
 	if err != nil {
 		return time.Time{}, err
@@ -124,4 +127,13 @@ func paneBusy(driver *tmux.Driver, sessID string) (bool, error) {
 		return true, fmt.Errorf("cannot read what session %s is running", sessID)
 	}
 	return stat.Procs > 1, nil
+}
+
+// CheckSocketOwnership uses the same persisted socket identity as the poller.
+// Unstamped legacy rows remain eligible for local lifecycle operations.
+func CheckSocketOwnership(driver *tmux.Driver, sess store.Session) error {
+	if sess.TmuxSocket != "" && sess.TmuxSocket != driver.SocketPath() {
+		return fmt.Errorf("session %s belongs to another tmux socket: %s", sess.ID, sess.TmuxSocket)
+	}
+	return nil
 }

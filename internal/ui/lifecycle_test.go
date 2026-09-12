@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,42 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
 )
+
+func TestLifecycleRefusesForeignSocket(t *testing.T) {
+	m := buildModel(t)
+	createSessionOn(t, m, "foreign", "quietchat", t.TempDir())
+	sess := m.sessionRows()[0]
+	foreign, err := tmux.NewWithSocket("amforeign-" + uuid.NewString()[:8])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := foreign.Create(sess.ID, sess.Cwd, "cat", nil, 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { foreign.Kill(sess.ID) })
+	if err := m.store.SetTmuxSocket(sess.ID, foreign.SocketPath()); err != nil {
+		t.Fatal(err)
+	}
+	sess, err = m.store.Get(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []struct {
+		name string
+		run  func(store.Session) error
+	}{{"kill", m.killSession}, {"revive", m.reviveSession}, {"restart", m.restartSession}} {
+		if err := operation.run(sess); err == nil || !strings.Contains(err.Error(), "another tmux socket") {
+			t.Fatalf("%s: %v", operation.name, err)
+		}
+		after, err := m.store.Get(sess.ID)
+		if err != nil || !reflect.DeepEqual(sess, after) {
+			t.Fatalf("%s changed session: %+v err=%v", operation.name, after, err)
+		}
+		if !foreign.Exists(sess.ID) || !m.tmux.Exists(sess.ID) {
+			t.Fatalf("%s changed a pane", operation.name)
+		}
+	}
+}
 
 func TestCreateArchiveRestoreDelete(t *testing.T) {
 	m := buildModel(t)

@@ -683,6 +683,9 @@ func (s *Sessions) Kill(sessionID, targetID string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	if err := CheckSocketOwnership(runtime.driver, target); err != nil {
+		return Session{}, err
+	}
 	if target.ID == sessionID {
 		return Session{}, errors.New("a session cannot kill itself")
 	}
@@ -724,6 +727,9 @@ func (s *Sessions) Revive(sessionID, targetID string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	if err := CheckSocketOwnership(runtime.driver, target); err != nil {
+		return Session{}, err
+	}
 	tool, known := runtime.cfg.Tools[target.Tool]
 	if !known {
 		return Session{}, fmt.Errorf("tool %s is no longer configured", target.Tool)
@@ -759,7 +765,7 @@ func (s *Sessions) Revive(sessionID, targetID string) (Session, error) {
 		_ = runtime.driver.Kill(target.ID)
 		return Session{}, err
 	}
-	// The row now lives on this manager's server, wherever it ran before.
+	// Stamp legacy rows with this manager's server.
 	// A row that cannot take the stamp is gone, and its fresh pane goes with
 	// it rather than outliving the session it was opened for.
 	if err := runtime.store.SetTmuxSocket(target.ID, runtime.driver.SocketPath()); err != nil {

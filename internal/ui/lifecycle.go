@@ -235,6 +235,9 @@ func (m *Model) degradedResumeNotice(sess store.Session) string {
 // resume_by_id_command instead of the working directory's most recent one,
 // which would be the wrong conversation whenever sessions share a cwd.
 func (m *Model) reviveSession(sess store.Session) error {
+	if err := sessioncmd.CheckSocketOwnership(m.tmux, sess); err != nil {
+		return err
+	}
 	if m.tmux.Exists(sess.ID) {
 		return fmt.Errorf("session %s is still running; revive only applies to dead sessions", sess.Name)
 	}
@@ -562,6 +565,9 @@ func (m *Model) unwatch(id string) {
 // id that revive needs. The pane is captured first so the preview still
 // shows the agent's last output once the window is gone.
 func (m *Model) killSession(sess store.Session) error {
+	if err := sessioncmd.CheckSocketOwnership(m.tmux, sess); err != nil {
+		return err
+	}
 	if !m.tmux.Exists(sess.ID) {
 		return nil
 	}
