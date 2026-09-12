@@ -103,6 +103,42 @@ func sameTerminalPath(left, right string) bool {
 	return leftErr == nil && rightErr == nil && resolvedLeft == resolvedRight
 }
 
+func TestTerminalSendKeysCannotInjectTmuxCommand(t *testing.T) {
+	h := newTerminalHarness(t)
+	created, err := h.terminals.Create(h.caller.ID, CreateTerminalOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Ending either a standalone argument or a key with ';' used to let
+	// the next argv entries address a session outside this nested terminal.
+	for _, separator := range []string{";", "Escape;", `\;`} {
+		if _, err := h.terminals.Send(h.caller.ID, created.ID, "", []string{
+			separator, "kill-session", "-t", "am_" + h.caller.ID,
+		}); err != nil {
+			t.Fatalf("Send %q: %v", separator, err)
+		}
+		if !h.driver.Exists(h.caller.ID) || !h.driver.Exists(created.ID) {
+			t.Fatalf("separator %q escaped the nested terminal", separator)
+		}
+	}
+	waitForTerminalOutput(t, h.terminals, h.caller.ID, created.ID, "kill-session")
+	callerPane, err := h.driver.CapturePane(h.caller.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(callerPane, "kill-session") {
+		t.Fatalf("keys reached the caller: %s", callerPane)
+	}
+	if _, err := h.terminals.Send(h.caller.ID, created.ID, "", []string{"C-c"}); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "ordinary-command-after-keys"
+	if _, err := h.terminals.Send(h.caller.ID, created.ID, "printf '%s\\n' '"+marker+"'; printf 'done\\n'", nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminalOutput(t, h.terminals, h.caller.ID, created.ID, marker)
+}
+
 func TestTerminalsCreateListSendAndReadWithRealTmux(t *testing.T) {
 	h := newTerminalHarness(t)
 	created, err := h.terminals.Create(h.caller.ID, CreateTerminalOptions{})

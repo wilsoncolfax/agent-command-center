@@ -168,6 +168,45 @@ func TestSetLabelNeutralizesFormatStrings(t *testing.T) {
 	}
 }
 
+func TestSendKeysPreservesKeysAndLiteralSeparators(t *testing.T) {
+	driver := requireTmux(t)
+	id := fmt.Sprintf("keys-%d", time.Now().UnixNano())
+	path := filepath.Join(t.TempDir(), "input")
+	keys := []string{"Enter", "Escape", "C-a", "Up", "Down", "Right", "Left", "Tab", "BSpace", ";", "text;", `\;`, `\\;`, "a;b"}
+	want := "\r\x1b\x01\x1b[A\x1b[B\x1b[C\x1b[D\t\x7f;text;\\;\\\\;a;b"
+	command := "stty raw -echo; dd bs=1 count=" + strconv.Itoa(len(want)) + " of=" + ShellQuote(path) + " 2>/dev/null"
+	if err := driver.Create(id, t.TempDir(), command, nil, 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { driver.Kill(id) })
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("key receiver did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	original := append([]string(nil), keys...)
+	if err := driver.SendKeys(id, keys...); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(keys, original) {
+		t.Fatalf("caller keys modified: %q", keys)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, _ := os.ReadFile(path); string(got) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got, _ := os.ReadFile(path)
+	t.Fatalf("key bytes = %q, want %q", got, want)
+}
+
 func TestSendText(t *testing.T) {
 	driver := requireTmux(t)
 	id := "send" + strings.ReplaceAll(time.Now().Format("150405.000000"), ".", "")

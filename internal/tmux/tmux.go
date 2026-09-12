@@ -527,11 +527,17 @@ func (d *Driver) SendText(id, text string) error {
 	return d.pasteAndEnter(PaneTarget(id), text)
 }
 
-// SendKeys delivers exact tmux key names to a session. Keeping each key as
-// its own argv entry avoids routing agent-supplied input through a shell.
+// SendKeys delivers exact tmux key names to a session. A trailing semicolon
+// must be escaped even in argv: tmux otherwise starts another command.
 func (d *Driver) SendKeys(id string, keys ...string) error {
 	args := []string{"send-keys", "-t", PaneTarget(id), "--"}
-	_, err := d.run(append(args, keys...)...)
+	for _, key := range keys {
+		if strings.HasSuffix(key, ";") {
+			key = key[:len(key)-1] + `\;`
+		}
+		args = append(args, key)
+	}
+	_, err := d.run(args...)
 	return err
 }
 
