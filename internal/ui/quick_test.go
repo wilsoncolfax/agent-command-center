@@ -81,9 +81,57 @@ func TestQuickPromptDeadSessionSetsError(t *testing.T) {
 	}
 }
 
+func TestQuickPromptRequiresLiveAgent(t *testing.T) {
+	for _, exited := range []bool{false, true} {
+		name := "alive"
+		if exited {
+			name = "exited"
+		}
+		t.Run(name, func(t *testing.T) {
+			m := buildModel(t)
+			createSessionOn(t, m, name, "quietchat", t.TempDir())
+			sess := m.sessionRows()[0]
+			waitForAgent(t, m, sess.ID, true)
+			if exited {
+				quitAgent(t, m, sess.ID)
+			}
+			pid, err := m.tmux.PanePID(sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.selectSessionRow(t, name)
+			m.openQuickMode()
+			const prompt = "F3 quick prompt delivery marker"
+			m.quick.input.SetValue(prompt)
+			m.submitQuick()
+			if exited {
+				if m.errBar.text != deadSessionHint || m.quick.input.Value() != prompt {
+					t.Fatalf("refusal: err=%q input=%q", m.errBar.text, m.quick.input.Value())
+				}
+			} else {
+				if m.errBar.text != "" || m.quick.input.Value() != "" {
+					t.Fatalf("delivery: err=%q input=%q", m.errBar.text, m.quick.input.Value())
+				}
+				settledPane(t, m, sess.ID, prompt)
+			}
+			pane, err := m.tmux.CapturePane(sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exited && strings.Contains(pane, prompt) {
+				t.Fatalf("prompt reached surviving shell:\n%s", pane)
+			}
+			if after, err := m.tmux.PanePID(sess.ID); err != nil || after != pid || !m.tmux.Exists(sess.ID) {
+				t.Fatalf("pane changed: pid=%d want=%d err=%v", after, pid, err)
+			}
+			waitForAgent(t, m, sess.ID, !exited)
+		})
+	}
+}
+
 func TestQuickPromptSendClearsAcked(t *testing.T) {
 	m := buildModel(t)
-	createSession(t, m, "answer-me", t.TempDir(), "")
+	createSessionOn(t, m, "answer-me", "quietchat", t.TempDir())
 
 	sess := m.sessionRows()[0]
 	if err := m.store.SetAcked(sess.ID, true); err != nil {
@@ -555,7 +603,7 @@ func TestQuickCloseAfterSendDefaultsToStayingOpen(t *testing.T) {
 
 func TestQuickPromptClosesAfterSendWhenEnabled(t *testing.T) {
 	m := buildModel(t)
-	createSession(t, m, "answer-me", t.TempDir(), "")
+	createSessionOn(t, m, "answer-me", "quietchat", t.TempDir())
 	m.selectSessionRow(t, "answer-me")
 	if err := m.store.SetSetting(quickCloseSetting, "close"); err != nil {
 		t.Fatal(err)
@@ -750,7 +798,7 @@ func TestQuickPromptNeverRunsWhatIsTypedAtAShell(t *testing.T) {
 
 func TestQuickSendRecordsLastPrompt(t *testing.T) {
 	m := buildModel(t)
-	createSession(t, m, "answer-me", t.TempDir(), "")
+	createSessionOn(t, m, "answer-me", "quietchat", t.TempDir())
 	m.selectSessionRow(t, "answer-me")
 	m.openQuickMode()
 	m.quick.input.SetValue("carry on with the plan")

@@ -12,6 +12,7 @@ import (
 	"github.com/YoanWai/agent-manager/internal/deps"
 	"github.com/YoanWai/agent-manager/internal/diff"
 	"github.com/YoanWai/agent-manager/internal/git"
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"github.com/YoanWai/agent-manager/internal/store"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -640,6 +641,15 @@ func (m *Model) reviewSendCmd(req reviewSendRequest) tea.Cmd {
 			previousRound: req.previousRound, round: req.round, count: req.count, sessName: req.sess.Name,
 		}
 		if !tmuxDriver.Exists(req.sess.ID) {
+			msg.err = errors.New(deadSessionHint)
+			return msg
+		}
+		running, err := sessioncmd.AgentRunning(tmuxDriver, req.sess.ID)
+		if err != nil {
+			msg.err = err
+			return msg
+		}
+		if !running {
 			msg.err = errors.New(deadSessionHint)
 			return msg
 		}

@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -119,6 +120,15 @@ func (m *Model) submitQuick() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !m.tmux.Exists(entry.sess.ID) {
+		m.errBar.text = deadSessionHint
+		return m, nil
+	}
+	running, err := sessioncmd.AgentRunning(m.tmux, entry.sess.ID)
+	if err != nil {
+		m.errBar.text = err.Error()
+		return m, nil
+	}
+	if !running {
 		m.errBar.text = deadSessionHint
 		return m, nil
 	}

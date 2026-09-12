@@ -101,6 +101,10 @@ func TestDiffScopeCycleAndLayout(t *testing.T) {
 
 func TestDiffAnnotateAndSend(t *testing.T) {
 	m := buildModel(t)
+	// Keep the mock agent alive when launch adds Claude MCP arguments.
+	tool := m.cfg.Tools["claude"]
+	tool.Command = "sh -c 'cat'"
+	m.cfg.Tools["claude"] = tool
 	dir := gitTestRepo(t)
 	createSession(t, m, "coder", dir, "")
 	m.selectSessionRow(t, "coder")
@@ -191,8 +195,63 @@ func TestDiffAnnotateAndSend(t *testing.T) {
 	}
 }
 
+func TestSendAnnotationsRefusesExitedAgent(t *testing.T) {
+	m := buildModel(t)
+	// Keep the mock agent alive when launch adds Claude MCP arguments.
+	tool := m.cfg.Tools["claude"]
+	tool.Command = "sh -c 'cat'"
+	m.cfg.Tools["claude"] = tool
+	openReviewOn(t, m, "exited-review", gitRepoWithTwoChangedFiles(t))
+	m.pressDiffKey(t, 'n')
+	m.openAnnotate()
+	const prompt = "F3 review delivery marker"
+	m.diff.annInput.SetValue(prompt)
+	m.applyCmd(t, m.saveAnnotation())
+	sess, ok := m.diffSession()
+	if !ok {
+		t.Fatal("missing review session")
+	}
+	// The agent can exit after confirmation but before the queued send runs.
+	_, cmd := m.sendAnnotations()
+	quitAgent(t, m, sess.ID)
+	pid, err := m.tmux.PanePID(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.applyCmd(t, cmd)
+	if m.errBar.text != deadSessionHint || m.diff.reviewSendPending || m.diff.notice != "" {
+		t.Fatalf("refusal: err=%q pending=%v notice=%q", m.errBar.text, m.diff.reviewSendPending, m.diff.notice)
+	}
+	notes := m.diff.annotations[m.reviewKey()]
+	if len(notes) != 1 || notes[0].round != 0 || m.diff.rounds[m.reviewKey()].Number != 0 {
+		t.Fatalf("draft not restored: notes=%+v round=%+v", notes, m.diff.rounds[m.reviewKey()])
+	}
+	state, err := m.store.ReviewState(sess.ID, m.diff.repoSel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Round.Number != 0 || len(state.Comments) != 1 || state.Comments[0].Round != 0 {
+		t.Fatalf("refused review marked sent: %+v", state)
+	}
+	pane, err := m.tmux.CapturePane(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(pane, prompt) {
+		t.Fatalf("review reached surviving shell:\n%s", pane)
+	}
+	if after, err := m.tmux.PanePID(sess.ID); err != nil || after != pid || !m.tmux.Exists(sess.ID) {
+		t.Fatalf("pane changed: pid=%d want=%d err=%v", after, pid, err)
+	}
+	waitForAgent(t, m, sess.ID, false)
+}
+
 func TestSendAnnotationsDoesNotDeliverAnUnpersistedRound(t *testing.T) {
 	m := buildModel(t)
+	// Keep the mock agent alive when launch adds Claude MCP arguments.
+	tool := m.cfg.Tools["claude"]
+	tool.Command = "sh -c 'cat'"
+	m.cfg.Tools["claude"] = tool
 	openReviewOn(t, m, "persist-first", gitRepoWithTwoChangedFiles(t))
 	m.pressDiffKey(t, 'n')
 	m.openAnnotate()
@@ -1288,6 +1347,10 @@ func TestAnnotationsReanchorAfterRefresh(t *testing.T) {
 
 func TestReviewRoundTracksOutdatedAndHandledComments(t *testing.T) {
 	m := buildModel(t)
+	// Keep the mock agent alive when launch adds Claude MCP arguments.
+	tool := m.cfg.Tools["claude"]
+	tool.Command = "sh -c 'cat'"
+	m.cfg.Tools["claude"] = tool
 	if m.gitDrv == nil {
 		t.Skip("git not installed")
 	}
@@ -1357,6 +1420,10 @@ func TestReviewRoundTracksOutdatedAndHandledComments(t *testing.T) {
 
 func TestAgentHandledUpdateReloadsWithoutDroppingTheComment(t *testing.T) {
 	m := buildModel(t)
+	// Keep the mock agent alive when launch adds Claude MCP arguments.
+	tool := m.cfg.Tools["claude"]
+	tool.Command = "sh -c 'cat'"
+	m.cfg.Tools["claude"] = tool
 	if m.gitDrv == nil {
 		t.Skip("git not installed")
 	}
