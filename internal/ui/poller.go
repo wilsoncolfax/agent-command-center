@@ -525,7 +525,11 @@ func (p *poller) refreshOnce() tea.Msg {
 			agentAlive := !stat.OK || stat.Procs > 1
 			if pane, err := p.tmux.CapturePane(sess.ID); err == nil {
 				paneLastLines[sess.ID], panePrompts[sess.ID] = p.rowLines(sess, pane)
-				sent, err := p.maybeSendPendingInput(sess, pane, agentAlive)
+				derived, err := p.derivePaneStatus(sess, pane, agentAlive, paneHashes)
+				if err != nil {
+					return errMsg{err}
+				}
+				sent, err := p.maybeSendPendingInput(sess, pane, derived, agentAlive)
 				if err != nil {
 					return errMsg{err}
 				}
@@ -537,10 +541,6 @@ func (p *poller) refreshOnce() tea.Msg {
 						sessions[i].LastPrompt = prompt
 					}
 					sessions[i].PendingInputs = sessions[i].PendingInputs[1:]
-				}
-				derived, err := p.derivePaneStatus(sess, pane, agentAlive, paneHashes)
-				if err != nil {
-					return errMsg{err}
 				}
 				newStatus = derived
 				// Launch inputs open the conversation, so they go first; a
@@ -831,7 +831,7 @@ func (p *poller) clearRecaptureSeen(sessID string) {
 // A durable claim makes automatic delivery at-most-once: after a process or
 // database failure, an ambiguous input is dropped and surfaced rather than
 // risking the same task or slash command running twice.
-func (p *poller) maybeSendPendingInput(sess store.Session, pane string, agentAlive bool) (bool, error) {
+func (p *poller) maybeSendPendingInput(sess store.Session, pane, derived string, agentAlive bool) (bool, error) {
 	if len(sess.PendingInputs) == 0 {
 		return false, nil
 	}
@@ -846,15 +846,23 @@ func (p *poller) maybeSendPendingInput(sess store.Session, pane string, agentAli
 		}
 		return false, nil
 	}
-	if !agentAlive {
+	if !agentAlive || !inboxDeliverable(derived) {
 		return false, nil
 	}
-	region, ready := p.engine.ActivityRegion(sess.Tool, ansi.Strip(pane))
+	clean := ansi.Strip(pane)
+	if p.engine.TypingHold(sess.Tool, clean) != "" {
+		return false, nil
+	}
+	region, ready := p.engine.ActivityRegion(sess.Tool, clean)
 	if !ready {
 		return false, nil
 	}
 	if !launchPromptTaken(sess, region) {
 		return false, nil
+	}
+	typing, err := p.promptCarriesTypedText(sess, clean)
+	if err != nil || typing {
+		return false, err
 	}
 	claimed, err := p.store.ClaimPendingInput(sess.ID, input)
 	if err != nil {

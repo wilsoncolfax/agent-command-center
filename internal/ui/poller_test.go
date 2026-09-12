@@ -1647,6 +1647,95 @@ func TestThePollLeavesTheHeartbeatAloneBetweenStamps(t *testing.T) {
 
 // Taking the launch prompt clears the composer, so a directive delivered
 // before then is discarded and has to wait for the prompt to reach output.
+func TestPendingInputHoldsUnsafeRecipients(t *testing.T) {
+	for _, condition := range []string{"dialog", "working-status", "working-rule", "draft", "safe"} {
+		t.Run(condition, func(t *testing.T) {
+			m := buildModel(t)
+			tool := m.cfg.Tools["send-tool"]
+			tool.Rules = []config.Rule{
+				{State: status.Waiting, Pattern: "Enter to confirm"},
+				{State: status.Working, Pattern: "esc to interrupt"},
+			}
+			m.cfg.Tools["send-tool"] = tool
+			engine, err := status.NewEngine(m.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.poller.engine = engine
+			if err := m.spawnSession("send-tool", "custom", t.TempDir(), "", "DEFERRED-SAFE-INPUT", false, false); err != nil {
+				t.Fatal(err)
+			}
+			sess, err := m.store.Get(m.sessionRows()[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pane := settledPane(t, m, sess.ID, "❯")
+			derived := status.Idle
+			switch condition {
+			case "dialog":
+				pane = "Do you want to proceed?\n  1. Yes\n  2. No\nEnter to confirm\n❯ "
+				derived = status.Waiting
+			case "working-status":
+				derived = status.Working
+			case "working-rule":
+				pane = "esc to interrupt\n❯ "
+			case "draft":
+				if err := m.tmux.Paste(sess.ID, "USERTEXT-in-progress"); err != nil {
+					t.Fatal(err)
+				}
+				pane = settledPane(t, m, sess.ID, "USERTEXT-in-progress")
+			}
+			if condition != "safe" {
+				before, err := m.tmux.CapturePane(sess.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sent, err := m.poller.maybeSendPendingInput(sess, pane, derived, true); err != nil || sent {
+					t.Fatalf("unsafe input sent: sent=%v err=%v", sent, err)
+				}
+				held, err := m.store.Get(sess.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if held.PendingInputClaimed || len(held.PendingInputs) != len(sess.PendingInputs) {
+					t.Fatalf("unsafe input was claimed or consumed: %+v", held)
+				}
+				after, err := m.tmux.CapturePane(sess.ID)
+				if err != nil || after != before {
+					t.Fatalf("unsafe delivery changed pane: err=%v\nbefore=%q\nafter=%q", err, before, after)
+				}
+			}
+			if condition == "draft" {
+				if err := m.tmux.SendKeys(sess.ID, "C-u"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				pane, err = m.tmux.CapturePane(sess.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sent, err := m.poller.maybeSendPendingInput(sess, pane, status.Idle, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sent {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("input remained held after recipient became safe")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if inputs := sessionPendingInputs(t, m, sess.ID); len(inputs) != 0 {
+				t.Fatalf("delivered input remained pending: %q", inputs)
+			}
+			settledPane(t, m, sess.ID, "DEFERRED-SAFE-INPUT")
+		})
+	}
+}
+
 func TestPendingInputWaitsForTheLaunchPrompt(t *testing.T) {
 	m := buildModel(t)
 	if err := m.spawnSession("slow-take-tool", "slow-take-tool-abcd", t.TempDir(), "", "/compact", true, false); err != nil {

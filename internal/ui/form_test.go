@@ -12,6 +12,7 @@ import (
 	"github.com/YoanWai/agent-manager/internal/config"
 	"github.com/YoanWai/agent-manager/internal/hooks"
 	"github.com/YoanWai/agent-manager/internal/launch"
+	"github.com/YoanWai/agent-manager/internal/status"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -683,7 +684,7 @@ func TestSendModeSurfacesSendFailureAndDoesNotRetry(t *testing.T) {
 	if err := m.tmux.Kill(sess.ID); err != nil {
 		t.Fatal(err)
 	}
-	sent, err := m.poller.maybeSendPendingInput(sess, "❯ ", true)
+	sent, err := m.poller.maybeSendPendingInput(sess, "❯ ", status.Idle, true)
 	if err == nil || !strings.Contains(err.Error(), "send pending input") || sent {
 		t.Fatalf("send result = %v, %v", sent, err)
 	}
@@ -694,7 +695,7 @@ func TestSendModeSurfacesSendFailureAndDoesNotRetry(t *testing.T) {
 	if !claimed.PendingInputClaimed {
 		t.Fatal("failed delivery was not left in an ambiguous durable state")
 	}
-	sent, err = m.poller.maybeSendPendingInput(claimed, "", false)
+	sent, err = m.poller.maybeSendPendingInput(claimed, "", status.Dead, false)
 	if err == nil || !strings.Contains(err.Error(), "ambiguous pending input") || !sent {
 		t.Fatalf("reconcile result = %v, %v", sent, err)
 	}
