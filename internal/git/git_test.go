@@ -649,6 +649,228 @@ func TestRemoveWorktreeIfClean(t *testing.T) {
 	}
 }
 
+func TestRemoveWorktreeIfCleanKeepsChangedIdentity(t *testing.T) {
+	for _, detached := range []bool{true, false} {
+		for _, ahead := range []bool{true, false} {
+			name := "switched"
+			if detached {
+				name = "detached"
+			}
+			if ahead {
+				name += "-unmerged"
+			}
+			t.Run(name, func(t *testing.T) {
+				driver, dir := testRepo(t)
+				write(t, dir, "a.txt", "seed")
+				commit(t, dir, "seed")
+				path, branch, err := driver.AddWorktree(dir, "keep")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ahead {
+					write(t, path, "unique.txt", "unmerged work")
+					commit(t, path, "unique work")
+				}
+				want, err := driver.run(dir, "rev-parse", "refs/heads/"+branch)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if detached {
+					gitIn(t, path, "checkout", "--detach", "main")
+				} else {
+					gitIn(t, path, "checkout", "-b", "other", "main")
+				}
+				if removed, err := driver.RemoveWorktreeIfClean(dir, path, branch); err != nil || removed {
+					t.Fatalf("changed identity must be kept: removed=%v err=%v", removed, err)
+				}
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("worktree must remain: %v", err)
+				}
+				if got, err := driver.run(dir, "rev-parse", "refs/heads/"+branch); err != nil || got != want {
+					t.Fatalf("recorded branch changed: got=%q want=%q err=%v", got, want, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRemoveWorktreeIfCleanKeepsAdvancedBranch(t *testing.T) {
+	driver, dir := testRepo(t)
+	write(t, dir, "a.txt", "seed")
+	commit(t, dir, "seed")
+	path, branch, err := driver.AddWorktree(dir, "racing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "checkout", "-b", "future")
+	write(t, dir, "unique.txt", "concurrent work")
+	commit(t, dir, "unique work")
+	want, err := driver.run(dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "checkout", "main")
+	t.Setenv("CLEANUP_TEST_GIT", driver.bin)
+	t.Setenv("CLEANUP_TEST_REF", "refs/heads/"+branch)
+	t.Setenv("CLEANUP_TEST_COMMIT", want)
+	wrapper := filepath.Join(t.TempDir(), "git")
+	// Advance the ref after removal, between the ancestry check and deletion.
+	script := `#!/bin/sh
+"$CLEANUP_TEST_GIT" "$@" || exit $?
+if [ "$3" = worktree ] && [ "$4" = remove ]; then
+  "$CLEANUP_TEST_GIT" update-ref "$CLEANUP_TEST_REF" "$CLEANUP_TEST_COMMIT"
+fi
+`
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	driver.bin = wrapper
+	if removed, err := driver.RemoveWorktreeIfClean(dir, path, branch); err == nil || removed {
+		t.Fatalf("advanced branch must refuse deletion: removed=%v err=%v", removed, err)
+	}
+	if got, err := driver.run(dir, "rev-parse", "refs/heads/"+branch); err != nil || got != want {
+		t.Fatalf("advanced branch lost: got=%q want=%q err=%v", got, want, err)
+	}
+}
+
+func TestRemoveWorktreeIfCleanKeepsBranchCheckedOutBeforeDeletion(t *testing.T) {
+	driver, dir := testRepo(t)
+	write(t, dir, "a.txt", "seed")
+	commit(t, dir, "seed")
+	path, branch, err := driver.AddWorktree(dir, "racing-checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := driver.run(dir, "rev-parse", "refs/heads/"+branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "config", "branch."+branch+".description", "keep metadata")
+	other := filepath.Join(t.TempDir(), "other")
+	t.Setenv("CLEANUP_TEST_GIT", driver.bin)
+	t.Setenv("CLEANUP_TEST_BRANCH", branch)
+	t.Setenv("CLEANUP_TEST_WORKTREE", other)
+	wrapper := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+"$CLEANUP_TEST_GIT" "$@" || exit $?
+if [ "$3" = worktree ] && [ "$4" = remove ]; then
+  "$CLEANUP_TEST_GIT" worktree add "$CLEANUP_TEST_WORKTREE" "$CLEANUP_TEST_BRANCH"
+fi
+`
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	driver.bin = wrapper
+	if removed, err := driver.RemoveWorktreeIfClean(dir, path, branch); err == nil || removed {
+		t.Fatalf("checked-out branch must refuse deletion: removed=%v err=%v", removed, err)
+	}
+	if got, err := driver.run(other, "rev-parse", "HEAD"); err != nil || got != want {
+		t.Fatalf("other worktree lost HEAD: got=%q want=%q err=%v", got, want, err)
+	}
+	if got, err := driver.run(dir, "config", "--get", "branch."+branch+".description"); err != nil || got != "keep metadata" {
+		t.Fatalf("refused deletion changed config: got=%q err=%v", got, err)
+	}
+}
+
+func TestRemoveWorktreeIfCleanKeepsBranchInUse(t *testing.T) {
+	for _, operation := range []string{"rebase", "bisect"} {
+		t.Run(operation, func(t *testing.T) {
+			driver, dir := testRepo(t)
+			for _, content := range []string{"seed", "middle", "tip"} {
+				write(t, dir, "a.txt", content)
+				commit(t, dir, content)
+			}
+			path, branch, err := driver.AddWorktree(dir, "in-use")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := driver.run(dir, "rev-parse", "refs/heads/"+branch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(t.TempDir(), "other")
+			t.Setenv("CLEANUP_TEST_GIT", driver.bin)
+			t.Setenv("CLEANUP_TEST_BRANCH", branch)
+			t.Setenv("CLEANUP_TEST_WORKTREE", other)
+			t.Setenv("CLEANUP_TEST_OPERATION", operation)
+			wrapper := filepath.Join(t.TempDir(), "git")
+			script := `#!/bin/sh
+"$CLEANUP_TEST_GIT" "$@" || exit $?
+if [ "$3" = worktree ] && [ "$4" = remove ]; then
+  "$CLEANUP_TEST_GIT" worktree add "$CLEANUP_TEST_WORKTREE" "$CLEANUP_TEST_BRANCH" || exit $?
+  if [ "$CLEANUP_TEST_OPERATION" = rebase ]; then
+    "$CLEANUP_TEST_GIT" -C "$CLEANUP_TEST_WORKTREE" rebase --force-rebase --exec false HEAD~2
+    test "$?" -ne 0 || exit 1
+  else
+    "$CLEANUP_TEST_GIT" -C "$CLEANUP_TEST_WORKTREE" bisect start HEAD HEAD~2 || exit $?
+  fi
+fi
+`
+			if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			driver.bin = wrapper
+			if removed, err := driver.RemoveWorktreeIfClean(dir, path, branch); err == nil || removed {
+				t.Fatalf("branch in use must be preserved: removed=%v err=%v", removed, err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("fixture must reach post-removal deletion: %v", err)
+			}
+			if _, err := driver.run(other, "symbolic-ref", "-q", "HEAD"); err == nil {
+				t.Fatal("operation must detach HEAD to exercise branch-use protection")
+			}
+			if got, err := driver.run(dir, "rev-parse", "refs/heads/"+branch); err != nil || got != want {
+				t.Fatalf("branch in use changed: got=%q want=%q err=%v", got, want, err)
+			}
+		})
+	}
+}
+
+func TestRemoveWorktreeIfCleanRemovesBranchConfigBeforeRecreation(t *testing.T) {
+	driver, dir := testRepo(t)
+	write(t, dir, "a.txt", "seed")
+	commit(t, dir, "seed")
+	path, branch, err := driver.AddWorktree(dir, "configured.branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]string{
+		"remote": ".", "merge": "refs/heads/main",
+		"pushRemote": "old-push", "rebase": "true", "description": "old description",
+	}
+	for key, value := range settings {
+		gitIn(t, dir, "config", "branch."+branch+"."+key, value)
+	}
+	gitIn(t, dir, "config", "branch.unrelated.description", "keep")
+	gitIn(t, dir, "config", "branch."+branch+".old.description", "keep similarly named")
+	if removed, err := driver.RemoveWorktreeIfClean(dir, path, branch); err != nil || !removed {
+		t.Fatalf("configured branch should remove: removed=%v err=%v", removed, err)
+	}
+	checkConfig := func() {
+		t.Helper()
+		for key := range settings {
+			if got, err := driver.run(dir, "config", "--local", "--get", "branch."+branch+"."+key); err == nil {
+				t.Fatalf("stale branch setting %s survived: %q", key, got)
+			}
+		}
+		if got, err := driver.run(dir, "config", "--get", "branch.unrelated.description"); err != nil || got != "keep" {
+			t.Fatalf("unrelated config changed: got=%q err=%v", got, err)
+		}
+		if got, err := driver.run(dir, "config", "--get", "branch."+branch+".old.description"); err != nil || got != "keep similarly named" {
+			t.Fatalf("similarly named branch config changed: got=%q err=%v", got, err)
+		}
+	}
+	checkConfig()
+	recreatedPath, recreatedBranch, err := driver.AddWorktree(dir, "configured.branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recreatedPath != path || recreatedBranch != branch {
+		t.Fatalf("recreated worktree differs: path=%q branch=%q", recreatedPath, recreatedBranch)
+	}
+	checkConfig()
+}
+
 func TestRenameWorktreeBranchKeepsDirectory(t *testing.T) {
 	driver, dir := testRepo(t)
 	write(t, dir, "a.txt", "x")
@@ -1229,30 +1451,50 @@ func TestRemoveWorktreeKeepsDirtyAndAhead(t *testing.T) {
 }
 
 func TestRemoveWorktreeIfCleanBranchNotMergedIntoCurrentHEAD(t *testing.T) {
-	driver, dir := testRepo(t)
-	write(t, dir, "a.txt", "x")
-	commit(t, dir, "c1")
+	for _, upstream := range []bool{false, true} {
+		name := "without-upstream"
+		if upstream {
+			name = "with-merged-upstream"
+		}
+		t.Run(name, func(t *testing.T) {
+			driver, dir := testRepo(t)
+			write(t, dir, "a.txt", "x")
+			commit(t, dir, "c1")
 
-	gitIn(t, dir, "branch", "feature")
+			gitIn(t, dir, "branch", "feature")
 
-	write(t, dir, "b.txt", "y")
-	commit(t, dir, "c2")
+			write(t, dir, "b.txt", "y")
+			commit(t, dir, "c2")
 
-	gitIn(t, dir, "checkout", "feature")
+			gitIn(t, dir, "checkout", "feature")
 
-	path, branch, err := driver.AddWorktree(dir, "clean")
-	if err != nil {
-		t.Fatalf("add: %v", err)
-	}
-	removed, err := driver.RemoveWorktreeIfClean(dir, path, branch)
-	if err != nil || !removed {
-		t.Fatalf("clean worktree merged into base should remove even when main checkout sits elsewhere: removed=%v err=%v", removed, err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("worktree directory still on disk")
-	}
-	if _, err := driver.run(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
-		t.Fatal("branch should be deleted")
+			path, branch, err := driver.AddWorktree(dir, "clean")
+			if err != nil {
+				t.Fatalf("add: %v", err)
+			}
+			if upstream {
+				gitIn(t, dir, "branch", "--set-upstream-to=main", branch)
+			}
+			removed, err := driver.RemoveWorktreeIfClean(dir, path, branch)
+			if !upstream {
+				if err == nil || removed {
+					t.Fatalf("native deletion must refuse an unmerged branch: removed=%v err=%v", removed, err)
+				}
+				if _, err := driver.run(dir, "rev-parse", "--verify", "refs/heads/"+branch); err != nil {
+					t.Fatalf("refused branch was lost: %v", err)
+				}
+				return
+			}
+			if err != nil || !removed {
+				t.Fatalf("clean worktree merged into base should remove even when main checkout sits elsewhere: removed=%v err=%v", removed, err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("worktree directory still on disk")
+			}
+			if _, err := driver.run(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+				t.Fatal("branch should be deleted")
+			}
+		})
 	}
 }
 

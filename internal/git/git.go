@@ -766,9 +766,37 @@ func (d *Driver) RenameWorktreeBranch(root, path, branch, newName string) (strin
 
 // RemoveWorktreeIfClean removes a session's worktree and its am/ branch
 // only when nothing would be lost: no uncommitted or untracked files, and
-// no commits missing from the base branch. A kept worktree is not an error.
+// no commits missing from the base branch. A detached or switched worktree
+// is kept, since its HEAD no longer identifies the recorded branch.
+// A kept worktree is not an error.
 func (d *Driver) RemoveWorktreeIfClean(root, path, branch string) (bool, error) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	ref := "refs/heads/" + branch
+	currentRef, err := d.run(path, "symbolic-ref", "-q", "HEAD")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	if currentRef != ref {
+		return false, nil
+	}
+	branchHead, err := d.run(root, "rev-parse", "--verify", ref)
+	if err != nil {
+		return false, err
+	}
+	worktreeHead, err := d.run(path, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	if worktreeHead != branchHead {
 		return false, nil
 	}
 	porcelain, err := d.run(path, "status", "--porcelain")
@@ -782,7 +810,7 @@ func (d *Driver) RemoveWorktreeIfClean(root, path, branch string) (bool, error) 
 	if base == "" {
 		return false, fmt.Errorf("no base ref in %s to compare %s against", root, branch)
 	}
-	ahead, err := d.run(path, "rev-list", "--count", base+"..HEAD")
+	ahead, err := d.run(root, "rev-list", "--count", base+".."+branchHead)
 	if err != nil {
 		return false, err
 	}
@@ -792,7 +820,8 @@ func (d *Driver) RemoveWorktreeIfClean(root, path, branch string) (bool, error) 
 	if _, err := d.run(root, "worktree", "remove", path); err != nil {
 		return false, err
 	}
-	if _, err := d.run(root, "branch", "-D", branch); err != nil {
+	// Git rechecks merge safety and branch use, and removes branch config.
+	if _, err := d.run(root, "branch", "-d", branch); err != nil {
 		return false, err
 	}
 	return true, nil
